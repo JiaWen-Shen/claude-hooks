@@ -18,6 +18,17 @@ fi
 # Read JSON input from stdin
 INPUT=$(cat 2>/dev/null)
 
+# Only notify if user has been inactive for more than 10 seconds
+LAST_ACTIVITY_FILE="/tmp/claude-last-user-activity"
+if [ -f "$LAST_ACTIVITY_FILE" ]; then
+  LAST_ACTIVITY=$(cat "$LAST_ACTIVITY_FILE" 2>/dev/null)
+  NOW=$(date +%s)
+  ELAPSED=$((NOW - LAST_ACTIVITY))
+  if [ "$ELAPSED" -lt 10 ]; then
+    exit 0
+  fi
+fi
+
 if [ "$EVENT" = "notification" ]; then
   # Extract message from input JSON
   DETAIL=$(echo "$INPUT" | python3 -c "
