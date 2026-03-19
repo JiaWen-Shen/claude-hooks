@@ -18,15 +18,19 @@ fi
 # Read JSON input from stdin
 INPUT=$(cat 2>/dev/null)
 
-# Only notify if user has been inactive for more than 10 seconds
-LAST_ACTIVITY_FILE="/tmp/claude-last-user-activity"
-if [ -f "$LAST_ACTIVITY_FILE" ]; then
-  LAST_ACTIVITY=$(cat "$LAST_ACTIVITY_FILE" 2>/dev/null)
-  NOW=$(date +%s)
-  ELAPSED=$((NOW - LAST_ACTIVITY))
-  if [ "$ELAPSED" -lt 10 ]; then
+SUPPRESS_FILE="/tmp/claude-suppress-next"
+LAST_STOP_FILE="/tmp/claude-last-stop"
+DEBUG_LOG="/tmp/claude-hook-debug.log"
+
+# If Stop fires: check suppress flag first, then write last_stop timestamp
+if [ "$EVENT" = "stop" ]; then
+  if [ -f "$SUPPRESS_FILE" ]; then
+    rm -f "$SUPPRESS_FILE"
+    echo "[$(date)] event=stop → SUPPRESS (user responded within 10s)" >> "$DEBUG_LOG"
     exit 0
   fi
+  date +%s > "$LAST_STOP_FILE"
+  echo "[$(date)] event=stop → SEND (writing last_stop)" >> "$DEBUG_LOG"
 fi
 
 if [ "$EVENT" = "notification" ]; then
