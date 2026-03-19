@@ -3,6 +3,10 @@
 # Usage: notify-telegram.sh <event_type>
 #   event_type: stop | notification
 #
+# Logic:
+#   stop       → 延遲 10 秒發送，UserPromptSubmit 可取消
+#   notification → 立即發送（Claude 在等使用者操作）
+#
 # Env vars required:
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_CHAT_ID
@@ -15,26 +19,40 @@ if [ -z "$BOT_TOKEN" ]; then
   exit 0
 fi
 
-# Read JSON input from stdin
 INPUT=$(cat 2>/dev/null)
-
-SUPPRESS_FILE="/tmp/claude-suppress-next"
-LAST_STOP_FILE="/tmp/claude-last-stop"
+PENDING_PID_FILE="/tmp/claude-pending-notify-pid"
 DEBUG_LOG="/tmp/claude-hook-debug.log"
 
-# If Stop fires: check suppress flag first, then write last_stop timestamp
-if [ "$EVENT" = "stop" ]; then
-  if [ -f "$SUPPRESS_FILE" ]; then
-    rm -f "$SUPPRESS_FILE"
-    echo "[$(date)] event=stop → SUPPRESS (user responded within 10s)" >> "$DEBUG_LOG"
-    exit 0
-  fi
-  date +%s > "$LAST_STOP_FILE"
-  echo "[$(date)] event=stop → SEND (writing last_stop)" >> "$DEBUG_LOG"
-fi
+_send_telegram() {
+  local text="$1"
+  curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${CHAT_ID}" \
+    --data-urlencode "text=${text}" \
+    > /dev/null 2>&1
+}
 
-if [ "$EVENT" = "notification" ]; then
-  # Extract message from input JSON
+if [ "$EVENT" = "stop" ]; then
+  # 清掉上一個還沒發出的計時器（如果有的話）
+  if [ -f "$PENDING_PID_FILE" ]; then
+    kill "$(cat "$PENDING_PID_FILE")" 2>/dev/null
+    rm -f "$PENDING_PID_FILE"
+  fi
+
+  TEXT="✅ Claude 完成工作了，回來看看吧"
+  echo "[$(date)] event=stop → scheduled (10s delay)" >> "$DEBUG_LOG"
+
+  # 背景等 10 秒，期間若 UserPromptSubmit 觸發會 kill 這個 PID
+  (
+    sleep 10
+    rm -f "$PENDING_PID_FILE"
+    echo "[$(date)] event=stop → SENT (no response in 10s)" >> "$DEBUG_LOG"
+    _send_telegram "$TEXT"
+  ) &
+
+  echo $! > "$PENDING_PID_FILE"
+
+elif [ "$EVENT" = "notification" ]; then
+  # Notification 代表 Claude 在等使用者確認，立即發送
   DETAIL=$(echo "$INPUT" | python3 -c "
 import sys, json
 try:
@@ -52,14 +70,9 @@ $DETAIL"
   else
     TEXT="⏸ Claude 需要你確認，請回來看看"
   fi
-else
-  # Stop event
-  TEXT="✅ Claude 完成工作了，回來看看吧"
-fi
 
-curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-  --data-urlencode "chat_id=${CHAT_ID}" \
-  --data-urlencode "text=${TEXT}" \
-  > /dev/null 2>&1
+  echo "[$(date)] event=notification → SENT (immediate)" >> "$DEBUG_LOG"
+  _send_telegram "$TEXT"
+fi
 
 exit 0
