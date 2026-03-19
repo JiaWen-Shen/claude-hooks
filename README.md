@@ -33,6 +33,9 @@ ln -s ~/path/to/claude-hooks/notify-telegram.sh ~/.claude/notify-telegram.sh
     "TELEGRAM_CHAT_ID": "your-chat-id"
   },
   "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "date +%s > /tmp/claude-last-user-activity" }] }
+    ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "bash ~/.claude/notify-telegram.sh stop" }] }
     ],
