@@ -32,27 +32,11 @@ _send_telegram() {
 }
 
 if [ "$EVENT" = "stop" ]; then
-  # 清掉上一個還沒發出的計時器（如果有的話）
-  if [ -f "$PENDING_PID_FILE" ]; then
-    kill "$(cat "$PENDING_PID_FILE")" 2>/dev/null
-    rm -f "$PENDING_PID_FILE"
-  fi
-
+  DELAY=180
   TEXT="✅ Claude 完成工作了，回來看看吧"
-  echo "[$(date)] event=stop → scheduled (10s delay)" >> "$DEBUG_LOG"
-
-  # 背景等 10 秒，期間若 UserPromptSubmit 觸發會 kill 這個 PID
-  (
-    sleep 10
-    rm -f "$PENDING_PID_FILE"
-    echo "[$(date)] event=stop → SENT (no response in 10s)" >> "$DEBUG_LOG"
-    _send_telegram "$TEXT"
-  ) &
-
-  echo $! > "$PENDING_PID_FILE"
-
+  LABEL="stop"
 elif [ "$EVENT" = "notification" ]; then
-  # Notification 代表 Claude 在等使用者確認，立即發送
+  DELAY=10
   DETAIL=$(echo "$INPUT" | python3 -c "
 import sys, json
 try:
@@ -62,7 +46,6 @@ try:
 except:
     print('')
 " 2>/dev/null)
-
   if [ -n "$DETAIL" ]; then
     TEXT="⏸ Claude 需要你確認
 
@@ -70,9 +53,26 @@ $DETAIL"
   else
     TEXT="⏸ Claude 需要你確認，請回來看看"
   fi
-
-  echo "[$(date)] event=notification → SENT (immediate)" >> "$DEBUG_LOG"
-  _send_telegram "$TEXT"
+  LABEL="notification"
+else
+  exit 0
 fi
+
+# 清掉上一個還沒發出的計時器
+if [ -f "$PENDING_PID_FILE" ]; then
+  kill "$(cat "$PENDING_PID_FILE")" 2>/dev/null
+  rm -f "$PENDING_PID_FILE"
+fi
+
+echo "[$(date)] event=$LABEL → scheduled (${DELAY}s delay)" >> "$DEBUG_LOG"
+
+(
+  sleep "$DELAY"
+  rm -f "$PENDING_PID_FILE"
+  echo "[$(date)] event=$LABEL → SENT (no response in ${DELAY}s)" >> "$DEBUG_LOG"
+  _send_telegram "$TEXT"
+) &
+
+echo $! > "$PENDING_PID_FILE"
 
 exit 0
