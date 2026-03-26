@@ -7,9 +7,10 @@
 #   notify-telegram.sh activity      (UserPromptSubmit hook)
 #
 # Logic:
-#   stop         → schedule notification in 30s (cancellable)
-#   activity     → cancel any pending notification
-#   notification → if message has content, schedule 30s "needs confirmation" (separate timer)
+#   stop         → send "✅ 完成工作了" immediately; cancel any pending confirm timer
+#   notification → if Stop fired within 3s: ignore (already notified by stop)
+#                  else: schedule "⏸ 需要你確認" after 30s (cancellable)
+#   activity     → cancel pending confirm timer
 #
 # Required env vars:
 #   TELEGRAM_BOT_TOKEN
@@ -18,7 +19,7 @@
 EVENT="${1:-stop}"
 BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
 CHAT_ID="${TELEGRAM_CHAT_ID}"
-STOP_PID="/tmp/claude-pending-stop-pid"
+STOP_RECENT="/tmp/claude-stop-recent"
 NOTIFY_PID="/tmp/claude-pending-notify-pid"
 IDLE_DELAY=30
 
@@ -33,33 +34,37 @@ _send() {
     > /dev/null 2>&1
 }
 
-_cancel_pending() {
-  for f in "$STOP_PID" "$NOTIFY_PID"; do
-    if [ -f "$f" ]; then
-      kill "$(cat "$f")" 2>/dev/null
-      rm -f "$f"
-    fi
-  done
+_cancel_confirm() {
+  if [ -f "$NOTIFY_PID" ]; then
+    kill "$(cat "$NOTIFY_PID")" 2>/dev/null
+    rm -f "$NOTIFY_PID"
+  fi
 }
 
 if [ "$EVENT" = "activity" ]; then
-  # User is back — cancel any scheduled notification
-  _cancel_pending
+  _cancel_confirm
   exit 0
 fi
 
 if [ "$EVENT" = "stop" ]; then
-  # Cancel previous stop timer (in case of rapid Stop events)
-  if [ -f "$STOP_PID" ]; then
-    kill "$(cat "$STOP_PID")" 2>/dev/null
-    rm -f "$STOP_PID"
-  fi
-  ( sleep "$IDLE_DELAY" && rm -f "$STOP_PID" && _send "✅ Claude 完成工作了，回來看看吧" ) &
-  echo $! > "$STOP_PID"
+  _cancel_confirm
+  date +%s > "$STOP_RECENT"
+  _send "✅ Claude 完成工作了，回來看看吧"
   exit 0
 fi
 
 if [ "$EVENT" = "notification" ]; then
+  # Suppress if Stop fired within the last 3 seconds —
+  # Notification fires together with Stop on task complete; Stop already sent the message.
+  if [ -f "$STOP_RECENT" ]; then
+    STOP_TIME=$(cat "$STOP_RECENT" 2>/dev/null)
+    NOW=$(date +%s)
+    if [ $((NOW - STOP_TIME)) -le 3 ]; then
+      exit 0
+    fi
+    rm -f "$STOP_RECENT"
+  fi
+
   DETAIL=$(cat 2>/dev/null | python3 -c "
 import sys, json
 try:
@@ -70,17 +75,11 @@ except:
     print('')
 " 2>/dev/null)
 
-  # Only act when there's actual content — that means Claude is blocked waiting for input.
-  # Generic "finished" notifications have no message; those are handled by the stop event.
   if [ -z "$DETAIL" ]; then
     exit 0
   fi
 
-  # Cancel previous notify timer and schedule a new one
-  if [ -f "$NOTIFY_PID" ]; then
-    kill "$(cat "$NOTIFY_PID")" 2>/dev/null
-    rm -f "$NOTIFY_PID"
-  fi
+  _cancel_confirm
   ( sleep "$IDLE_DELAY" && rm -f "$NOTIFY_PID" && _send "⏸ Claude 需要你確認
 
 $DETAIL" ) &
