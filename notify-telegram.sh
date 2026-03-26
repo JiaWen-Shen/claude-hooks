@@ -9,7 +9,7 @@
 # Logic:
 #   stop         → schedule notification in 30s (cancellable)
 #   activity     → cancel any pending notification
-#   notification → always send immediately (Claude is blocked)
+#   notification → if message has content, schedule 30s "needs confirmation" (separate timer)
 #
 # Required env vars:
 #   TELEGRAM_BOT_TOKEN
@@ -18,7 +18,8 @@
 EVENT="${1:-stop}"
 BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
 CHAT_ID="${TELEGRAM_CHAT_ID}"
-PENDING_PID="/tmp/claude-pending-notify-pid"
+STOP_PID="/tmp/claude-pending-stop-pid"
+NOTIFY_PID="/tmp/claude-pending-notify-pid"
 IDLE_DELAY=30
 
 if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
@@ -33,10 +34,12 @@ _send() {
 }
 
 _cancel_pending() {
-  if [ -f "$PENDING_PID" ]; then
-    kill "$(cat "$PENDING_PID")" 2>/dev/null
-    rm -f "$PENDING_PID"
-  fi
+  for f in "$STOP_PID" "$NOTIFY_PID"; do
+    if [ -f "$f" ]; then
+      kill "$(cat "$f")" 2>/dev/null
+      rm -f "$f"
+    fi
+  done
 }
 
 if [ "$EVENT" = "activity" ]; then
@@ -46,11 +49,13 @@ if [ "$EVENT" = "activity" ]; then
 fi
 
 if [ "$EVENT" = "stop" ]; then
-  # Cancel previous pending (in case of rapid Stop events)
-  _cancel_pending
-  # Schedule notification after IDLE_DELAY seconds
-  ( sleep "$IDLE_DELAY" && rm -f "$PENDING_PID" && _send "✅ Claude 完成工作了，回來看看吧" ) &
-  echo $! > "$PENDING_PID"
+  # Cancel previous stop timer (in case of rapid Stop events)
+  if [ -f "$STOP_PID" ]; then
+    kill "$(cat "$STOP_PID")" 2>/dev/null
+    rm -f "$STOP_PID"
+  fi
+  ( sleep "$IDLE_DELAY" && rm -f "$STOP_PID" && _send "✅ Claude 完成工作了，回來看看吧" ) &
+  echo $! > "$STOP_PID"
   exit 0
 fi
 
@@ -65,17 +70,21 @@ except:
     print('')
 " 2>/dev/null)
 
-  # Same delayed mechanism as stop — cancel existing timer, start a new 30s one.
-  # This prevents duplicate/immediate sends when both Stop and Notification fire together.
-  _cancel_pending
-  if [ -n "$DETAIL" ]; then
-    ( sleep "$IDLE_DELAY" && rm -f "$PENDING_PID" && _send "⏸ Claude 需要你確認
+  # Only act when there's actual content — that means Claude is blocked waiting for input.
+  # Generic "finished" notifications have no message; those are handled by the stop event.
+  if [ -z "$DETAIL" ]; then
+    exit 0
+  fi
+
+  # Cancel previous notify timer and schedule a new one
+  if [ -f "$NOTIFY_PID" ]; then
+    kill "$(cat "$NOTIFY_PID")" 2>/dev/null
+    rm -f "$NOTIFY_PID"
+  fi
+  ( sleep "$IDLE_DELAY" && rm -f "$NOTIFY_PID" && _send "⏸ Claude 需要你確認
 
 $DETAIL" ) &
-  else
-    ( sleep "$IDLE_DELAY" && rm -f "$PENDING_PID" && _send "✅ Claude 完成工作了，回來看看吧" ) &
-  fi
-  echo $! > "$PENDING_PID"
+  echo $! > "$NOTIFY_PID"
   exit 0
 fi
 
