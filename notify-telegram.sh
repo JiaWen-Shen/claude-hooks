@@ -7,9 +7,9 @@
 #   notify-telegram.sh activity      (UserPromptSubmit hook)
 #
 # Logic:
-#   activity     → record timestamp to /tmp/claude-last-activity
-#   stop         → only notify if idle > IDLE_THRESHOLD seconds
-#   notification → always notify (Claude is blocked waiting for user)
+#   stop         → schedule notification in 30s (cancellable)
+#   activity     → cancel any pending notification
+#   notification → always send immediately (Claude is blocked)
 #
 # Required env vars:
 #   TELEGRAM_BOT_TOKEN
@@ -18,16 +18,10 @@
 EVENT="${1:-stop}"
 BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
 CHAT_ID="${TELEGRAM_CHAT_ID}"
-ACTIVITY_FILE="/tmp/claude-last-activity"
-IDLE_THRESHOLD=30
+PENDING_PID="/tmp/claude-pending-notify-pid"
+IDLE_DELAY=30
 
 if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-  exit 0
-fi
-
-# Record user activity timestamp — no notification needed
-if [ "$EVENT" = "activity" ]; then
-  date +%s > "$ACTIVITY_FILE"
   exit 0
 fi
 
@@ -38,19 +32,29 @@ _send() {
     > /dev/null 2>&1
 }
 
-if [ "$EVENT" = "stop" ]; then
-  # Check idle time
-  if [ -f "$ACTIVITY_FILE" ]; then
-    LAST=$(cat "$ACTIVITY_FILE")
-    NOW=$(date +%s)
-    IDLE=$((NOW - LAST))
-    if [ "$IDLE" -lt "$IDLE_THRESHOLD" ]; then
-      exit 0  # User is active, skip notification
-    fi
+_cancel_pending() {
+  if [ -f "$PENDING_PID" ]; then
+    kill "$(cat "$PENDING_PID")" 2>/dev/null
+    rm -f "$PENDING_PID"
   fi
-  _send "✅ Claude 完成工作了，回來看看吧"
+}
 
-elif [ "$EVENT" = "notification" ]; then
+if [ "$EVENT" = "activity" ]; then
+  # User is back — cancel any scheduled notification
+  _cancel_pending
+  exit 0
+fi
+
+if [ "$EVENT" = "stop" ]; then
+  # Cancel previous pending (in case of rapid Stop events)
+  _cancel_pending
+  # Schedule notification after IDLE_DELAY seconds
+  ( sleep "$IDLE_DELAY" && rm -f "$PENDING_PID" && _send "✅ Claude 完成工作了，回來看看吧" ) &
+  echo $! > "$PENDING_PID"
+  exit 0
+fi
+
+if [ "$EVENT" = "notification" ]; then
   DETAIL=$(cat 2>/dev/null | python3 -c "
 import sys, json
 try:
@@ -61,13 +65,18 @@ except:
     print('')
 " 2>/dev/null)
 
+  # Same delayed mechanism as stop — cancel existing timer, start a new 30s one.
+  # This prevents duplicate/immediate sends when both Stop and Notification fire together.
+  _cancel_pending
   if [ -n "$DETAIL" ]; then
-    _send "⏸ Claude 需要你確認
+    ( sleep "$IDLE_DELAY" && rm -f "$PENDING_PID" && _send "⏸ Claude 需要你確認
 
-$DETAIL"
+$DETAIL" ) &
   else
-    _send "⏸ Claude 需要你確認，請回來看看"
+    ( sleep "$IDLE_DELAY" && rm -f "$PENDING_PID" && _send "✅ Claude 完成工作了，回來看看吧" ) &
   fi
+  echo $! > "$PENDING_PID"
+  exit 0
 fi
 
 exit 0
